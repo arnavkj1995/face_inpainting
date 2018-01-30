@@ -4,11 +4,10 @@ import os
 import sys
 sys.path.append('../')
 
-from model_errors import ECGAN
-from utils_errors import pp
+from model import ECGAN
+from utils import pp
 
 import tensorflow as tf
-# from inception_score import inception_score
 
 flags = tf.app.flags
 # flags.DEFINE_integer("momentum_decay_steps", 100,
@@ -40,17 +39,9 @@ flags.DEFINE_integer("pre_train_iters", 2000,
 flags.DEFINE_integer("num_keypoints", 68,
 					  "Number of keypoints extracted in the face")
 
-dataset = "celebA"
-# comment = "G109_Pre_VAR_asbefore(archi)_soft_label_No_margin_BN_0.0001_0.0001_50"
-# comment = "Patch_Probability_109_Server_NO_PreTrain_Margin_0.3_0.0001_0.0001_50"
-# comment = "pretrained"
-#comment = "thesis_policy_mnist_cond"
-#comment = "error_conceal_celeba_try_128"
-#comment = "64x64_cross_check"
-#comment = "ecgan_128_dim_32_batch_64"
-# comment = "error_conceal_celebA_64x64_siamese"
-comment = "simple_concat_64x64"
 
+dataset = "celebA"
+comment = "model_weights"
 """   --meaning for the acronyms for folder names ----
  chkpt
 BN:Batch Norm to G
@@ -100,17 +91,15 @@ flags.DEFINE_float('hmcBeta', 0.2, "hmcBeta")
 flags.DEFINE_float('hmcEps', 0.001, "hmcEps")
 flags.DEFINE_integer('hmcL', 100, "hmcL")
 flags.DEFINE_integer('hmcAnneal', 1, "hmcAnneal")
-flags.DEFINE_integer('nIter', 1500, "nIter")
-flags.DEFINE_integer('imgSize',64, "imgSize")
+flags.DEFINE_integer('nIter', 1000, "nIter")
 flags.DEFINE_float('lam', 0.1, "lam")
-flags.DEFINE_string('outDir', 'temporal_64', "Directory to save completed images.")
+flags.DEFINE_string('outDir', 'temporal_results', "Directory to save completed images.")
 flags.DEFINE_integer('outInterval', 100, 'outInterval')
-flags.DEFINE_string('maskType', 'random', 'maskType')
+flags.DEFINE_string('maskType', 'center', 'maskType')
 flags.DEFINE_float('centerScale', 0.25, 'centerScale')
 flags.DEFINE_string('imgs', ' ', 'Images list')
 
 # flags.DEFINE_integer('outDir', 'completions', "Directory to save completed images.")
-
 if dataset == "mnist":
 	flags.DEFINE_integer("c_dim", 1, "Number of channels in input image")
 	flags.DEFINE_boolean("is_grayscale", True, "True for grayscale image")
@@ -126,6 +115,7 @@ else:
 	flags.DEFINE_integer("output_size", 32, "True for grayscale image")
 	if dataset == "cifar":
 		flags.DEFINE_integer("num_classes", 10, "Number of class labels")
+
 
 FLAGS = flags.FLAGS
 

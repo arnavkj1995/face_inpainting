@@ -4,8 +4,8 @@ import os
 import sys
 sys.path.append('../')
 
-from model_errors import ECGAN
-from utils_errors import pp
+from model import ECGAN
+from utils import pp
 
 import tensorflow as tf
 
@@ -38,15 +38,10 @@ flags.DEFINE_integer("pre_train_iters", 2000,
 					  "Number of iterations to pre-train D")
 flags.DEFINE_integer("num_keypoints", 68,
 					  "Number of keypoints extracted in the face")
+# flags.DEFINE_integer('outDir', 'completions', "Directory to save completed images.")
 
 dataset = "celebA"
-# comment = "G109_Pre_VAR_asbefore(archi)_soft_label_No_margin_BN_0.0001_0.0001_50"
-# comment = "Patch_Probability_109_Server_NO_PreTrain_Margin_0.3_0.0001_0.0001_50"
-# comment = "pretrained"
-#comment = "thesis_policy_mnist_cond"
-#comment = "error_conceal_celeba_try_128"
-#comment = "64x64_cross_check"
-comment = "simple_concat_64x64"
+comment = "model_weights"
 
 """   --meaning for the acronyms for folder names ----
  chkpt
@@ -98,15 +93,12 @@ flags.DEFINE_float('hmcEps', 0.001, "hmcEps")
 flags.DEFINE_integer('hmcL', 100, "hmcL")
 flags.DEFINE_integer('hmcAnneal', 1, "hmcAnneal")
 flags.DEFINE_integer('nIter', 1500, "nIter")
-flags.DEFINE_integer('imgSize',128, "imgSize")
 flags.DEFINE_float('lam', 0.1, "lam")
-flags.DEFINE_string('outDir', 'completions_64', "Directory to save completed images.")
+flags.DEFINE_string('outDir', 'completions_results', "Directory to save completed images.")
 flags.DEFINE_integer('outInterval', 100, 'outInterval')
 flags.DEFINE_string('maskType', 'center', 'maskType')
 flags.DEFINE_float('centerScale', 0.25, 'centerScale')
 flags.DEFINE_string('imgs', ' ', 'Images list')
-
-# flags.DEFINE_integer('outDir', 'completions', "Directory to save completed images.")
 
 if dataset == "mnist":
 	flags.DEFINE_integer("c_dim", 1, "Number of channels in input image")
@@ -123,6 +115,7 @@ else:
 	flags.DEFINE_integer("output_size", 32, "True for grayscale image")
 	if dataset == "cifar":
 		flags.DEFINE_integer("num_classes", 10, "Number of class labels")
+
 
 FLAGS = flags.FLAGS
 

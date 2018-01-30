@@ -2,94 +2,100 @@ from __future__ import division
 import os
 import sys
 import time
-import tensorflow as tf
-import numpy as np
-import scipy.misc
-from six.moves import xrange
-
 import reader
 import random
 from ops import *
+import scipy.misc
+import numpy as np
+import tensorflow as tf
 import poissonblending
-from utils_errors import *
-from skimage.measure import compare_ssim
+from six.moves import xrange
 from skimage.measure import compare_psnr
+from skimage.measure import compare_mse
 
 F = tf.app.flags.FLAGS
 
-class DCGAN(object):
+class ECGAN(object):
     def __init__(self, sess):
         self.sess = sess
-        if F.dataset != "lsun" and F.inc_score:
-            print("Loading inception module")
-            self.inception_module = inception_score(self.sess)
-            print("Inception module loaded")
-
+        self.ngf = 128
+        self.ndf = 64
+        self.nt = 128
+        self.k_dim = 16
         self.image_shape = [F.output_size, F.output_size, 3]
         self.build_model()
-        self.is_crop = False
+        if F.output_size == 64:
+            self.is_crop = True
+        else:
+            self.is_crop = False
 
     def build_model(self):
+        # main method for training the conditional GAN
         if F.use_tfrecords == True:
             # load images from tfrecords + queue thread runner for better GPU utilization
-            tfrecords_filename = ['train_data/' + x for x in os.listdir('train_data/')]
+            tfrecords_filename = ['train_records/' + x for x in os.listdir('train_records/')]
             filename_queue = tf.train.string_input_producer(
                                 tfrecords_filename, num_epochs=100)
 
 
-            self.images, _ = reader.read_and_decode(filename_queue, F.batch_size)
+            self.images, self.keypoints = reader.read_and_decode(filename_queue, F.batch_size)
 
             if F.output_size == 64:
                 self.images = tf.image.resize_images(self.images, (64, 64))
+                self.keypoints = tf.image.resize_images(self.keypoints, (64, 64))
 
             self.images = (self.images / 127.5) - 1
+            self.keypoints = (self.keypoints / 127.5) - 1
 
         else:    
             self.images = tf.placeholder(tf.float32,
                                        [F.batch_size, F.output_size, F.output_size,
                                         F.c_dim],
                                        name='real_images')
-        
-        self.z_gen = tf.placeholder(tf.float32, [None, F.z_dim], name='z')        
+            self.keypoints = tf.placeholder(tf.float32, [F.batch_size, F.output_size, F.output_size, F.c_dim], name='keypts')
 
-        self.G_mean = self.generator(self.z_gen)
-        self.D, self.D_logits = self.discriminator(self.images, reuse=False)
-        self.D_, self.D_logits_, = self.discriminator(self.G_mean, reuse=True)
+        self.is_training = tf.placeholder(tf.bool, name='is_training')        
+        self.z_gen = tf.placeholder(tf.float32, [F.batch_size, F.z_dim], name='z')
 
-        #calculations for getting hard predictions
-        # +1 means fooled the D network while -1 mean D has won
+        self.G = self.generator(self.z_gen, self.keypoints)
+        self.D, self.D_logits = self.discriminator(self.images, self.keypoints, reuse=False)
+        self.D_, self.D_logits_, = self.discriminator(self.G, self.keypoints, reuse=True)
+
         self.d_loss_real = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(logits = self.D_logits, labels = tf.ones_like(self.D)))
+            tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D_logits, labels=tf.ones_like(self.D)))
         self.d_loss_fake = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(logits = self.D_logits_, labels = tf.zeros_like(self.D_)))
+            tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D_logits_, labels=tf.zeros_like(self.D_)))
         self.d_loss = self.d_loss_real + self.d_loss_fake
-
         self.g_loss_actual = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(logits = self.D_logits_, labels = tf.ones_like(self.D_)))
-
-        self.g_loss = tf.constant(0)        
+            tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D_logits_, labels=tf.ones_like(self.D_)))
 
         if F.error_conceal == True:
             self.mask = tf.placeholder(tf.float32, [F.batch_size] + self.image_shape, name='mask')
-            self.contextual_loss = tf.reduce_sum(
-              tf.contrib.layers.flatten(
-              tf.abs(tf.multiply(self.mask, self.G_mean) - tf.multiply(self.mask, self.images))), 1)
+            self.contextual_loss = tf.reduce_sum(tf.contrib.layers.flatten(
+                                                 tf.abs(tf.multiply(self.mask, self.G) -
+                                                 tf.multiply(self.mask, self.images))), 1)
             self.perceptual_loss = self.g_loss_actual
             self.complete_loss = self.contextual_loss + F.lam * self.perceptual_loss
             self.grad_complete_loss = tf.gradients(self.complete_loss, self.z_gen)
 
+        # create summaries  for Tensorboard visualization
+        tf.summary.scalar('disc_loss', self.d_loss)
+        tf.summary.scalar('disc_loss_real', self.d_loss_real)
+        tf.summary.scalar('disc_loss_fake', self.d_loss_fake)
+        tf.summary.scalar('gen_loss', self.g_loss_actual)
+
+        self.g_loss = tf.constant(0) 
+
         t_vars = tf.trainable_variables()
-        self.d_vars = [var for var in t_vars if 'd_' in var.name]
-        self.g_vars = [var for var in t_vars if 'g_' in var.name]
+        self.d_vars = [var for var in t_vars if 'D/d_' in var.name]
+        self.g_vars = [var for var in t_vars if 'G/g_' in var.name]
 
         self.saver = tf.train.Saver()
 
     def train(self):
-        """Train DCGAN"""
-        data = dataset()
-        global_step = tf.placeholder(tf.int32, [], name="global_step_epochs")
+        # main method for training conditonal GAN
 
-        
+        global_step = tf.placeholder(tf.int32, [], name="global_step_iterations")
 
         learning_rate_D = tf.train.exponential_decay(F.learning_rate_D, global_step,
                                                      decay_steps=F.decay_step,
@@ -97,129 +103,123 @@ class DCGAN(object):
         learning_rate_G = tf.train.exponential_decay(F.learning_rate_G, global_step,
                                                      decay_steps=F.decay_step,
                                                      decay_rate=F.decay_rate, staircase=True)
+        
+        self.summary_op = tf.summary.merge_all()
+
         d_optim = tf.train.AdamOptimizer(learning_rate_D, beta1=F.beta1D)\
-            .minimize(self.d_loss, var_list=self.d_vars)
+          .minimize(self.d_loss, var_list=self.d_vars)
         g_optim = tf.train.AdamOptimizer(learning_rate_G, beta1=F.beta1G)\
-            .minimize(self.g_loss_actual, var_list=self.g_vars)
+          .minimize(self.g_loss_actual, var_list=self.g_vars)
 
-        tf.initialize_all_variables().run() 
+        init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+        self.sess.run(init_op)
 
-        counter = 0
         start_time = time.time()
 
         if F.load_chkpt:
             try:
                 self.load(F.checkpoint_dir)
-                print(" [*] Load SUCCESS")
+                print(" [*] Checkpoint Load Success !!!")
             except:
-                print(" [!] Load failed...")
+                print(" [!] Checkpoint Load failed !!!!")
         else:
             print(" [*] Not Loaded")
 
         self.ra, self.rb = -1, 1
+        counter = 1
+        step = 1
+        idx = 1
 
-        for epoch in xrange(1000000):
-            idx = 0
-            iscore = 0.0, 0.0 # self.get_inception_score()
-            batch_iter = data.batch()
-            for sample_images in batch_iter:
-                
+        writer = tf.summary.FileWriter(F.log_dir, graph=tf.get_default_graph())
+
+        # Start input enqueue threads.
+        coord = tf.train.Coordinator()
+        threads = tf.train.start_queue_runners(sess=self.sess, coord=coord)
+
+        try:
+            while not coord.should_stop():
+                start_time = time.time()
+                step += 1
+
+                # sample a noise vector 
                 sample_z_gen = np.random.uniform(
-                    self.ra, self.rb, [F.batch_size, F.z_dim]).astype(np.float32)
-		
-		errG_actual = self.g_loss_actual.eval({self.z_gen: sample_z_gen})
-		E_Fake = self.d_loss_fake.eval({self.z_gen: sample_z_gen})
-                E_Real = self.d_loss_real.eval({self.images: sample_images})
+                        self.ra, self.rb, [F.batch_size, F.z_dim]).astype(np.float32)
 
-		
                 # Update D network
                 iters = 1
                 if True: 
-                  #print('Train D net')
-                  _,  dlossf = self.sess.run(
-                      [d_optim,  self.d_loss_fake],
-                      feed_dict={self.images: sample_images, 
-                                self.z_gen: sample_z_gen, global_step: epoch})
-                  
-                 
+                    train_summary, _, dloss, errD_fake, errD_real = self.sess.run(
+                            [self.summary_op, d_optim,  self.d_loss, self.d_loss_fake, self.d_loss_real],
+                            feed_dict={self.z_gen: sample_z_gen, global_step: counter, self.is_training: True})
+                    writer.add_summary(train_summary, counter)
 
                 # Update G network
-                iters = 1
+                iters = 1  # can play around 
                 if True :
-                   sample_z_gen = np.random.uniform(self.ra, self.rb,
-		   				[F.batch_size, F.z_dim]).astype(np.float32)
-                   #print('Train G Net')
-                   _,  gloss, dloss = self.sess.run(
-                        [g_optim,  self.g_loss, self.d_loss],
-                        feed_dict={self.images: sample_images, self.z_gen: sample_z_gen,
-                                    global_step: epoch})
-                   
+                    for iter_gen in range(iters):
+                        sample_z_gen = np.random.uniform(self.ra, self.rb,
+                            [F.batch_size, F.z_dim]).astype(np.float32)
+                        _,  gloss, dloss = self.sess.run(
+                            [g_optim,  self.g_loss_actual, self.d_loss],
+                            feed_dict={self.z_gen: sample_z_gen, global_step: counter, self.is_training: True})
+                       
+                lrateD = learning_rate_D.eval({global_step: counter})
+                lrateG = learning_rate_G.eval({global_step: counter})
 
-                errD_fake = self.d_loss_fake.eval({ self.z_gen: sample_z_gen})
-                errD_real = self.d_loss_real.eval({self.images: sample_images})
-                errG = self.g_loss.eval({self.z_gen: sample_z_gen})
-                errG_actual = self.g_loss_actual.eval({self.z_gen: sample_z_gen})
-                lrateD = learning_rate_D.eval({global_step: epoch})
-                lrateG = learning_rate_G.eval({global_step: epoch})
-                
+                print(("Iteration: [%6d] lrateD:%.2e lrateG:%.2e d_loss_f:%.8f d_loss_r:%.8f " +
+                      "g_loss_act:%.8f")
+                      % (idx, lrateD, lrateG, errD_fake, errD_real, gloss))
+
+                # peridically save generated images with corresponding checkpoints
+
+                if np.mod(counter, F.sampleInterval) == 0:
+                    sample_z_gen = np.random.uniform(self.ra, self.rb, [F.batch_size, F.z_dim]).astype(np.float32)
+                    samples, key_pts,  d_loss, g_loss_actual = self.sess.run(
+                        [self.G, self.keypoints,  self.d_loss, self.g_loss_actual],
+                        feed_dict={self.z_gen: sample_z_gen, global_step: counter, self.is_training: False}
+                    )
+                    save_images(samples, [8, 8],
+                                F.sample_dir + "/sample_" + str(counter) + ".png")
+                    save_images(key_pts,  [8, 8],  
+                                F.sample_dir + "/sampleky_" + str(counter) + ".png")
+                    print("new samples stored!!")
+                 
+                # periodically save checkpoints for future loading
+                if np.mod(counter, F.saveInterval) == 0:
+                    self.save(F.checkpoint_dir, counter)
+                    print("Checkpoint saved successfully !!!")
 
                 counter += 1
                 idx += 1
-                print(("Epoch:[%2d] [%4d/%4d]  d_loss_f:%.8f d_loss_r:%.8f " +
-                      "g_loss_act:%.2f ")
-                      % (epoch, idx, data.num_batches,  errD_fake,
-                         errD_real, errG_actual))
+                
+        except tf.errors.OutOfRangeError:
+            print('Done training for %d epochs, %d steps.' % (F.num_epochs, step))
+        finally:
+            # When done, ask the threads to stop.
+            coord.request_stop()
 
+        coord.request_stop()
+        coord.join(threads)
 
-
-                if np.mod(counter, 500) == 1:
-                    sample_z_gen = np.random.uniform(self.ra, self.rb, [F.batch_size, F.z_dim]).astype(np.float32)
-                    samples, d_loss, g_loss_actual = self.sess.run(
-                        [self.G_mean, self.d_loss, self.g_loss_actual],
-                        feed_dict={self.z_gen: sample_z_gen, self.images: sample_images}
-                    )
-                    save_images(samples, [8, 8],
-                                F.sample_dir + "/sample.png")
-                    print("samples saved")
-
-                if np.mod(counter, 500) == 1:
-                    self.save(F.checkpoint_dir)
-                    print("Checkpoint saved")
-            
-            sample_z_gen = np.random.uniform(self.ra, self.rb, [F.batch_size, F.z_dim]).astype(np.float32)
-            samples, d_loss, g_loss_actual = self.sess.run(
-                [self.G_mean, self.d_loss, self.g_loss_actual],
-                feed_dict={ self.z_gen: sample_z_gen, self.images: sample_images}
-            )
-            save_images(samples, [8, 8],
-                        F.sample_dir + "/train_{:03d}.png".format(epoch))
-            #if epoch % 5 == 0:
-            #    iscore = self.get_inception_score()
-
-        # imgs2 is generator output
-
-    # imgs2 is generator output
     def poisson_blend(self, imgs1, imgs2, mask):
+        # call this while performing correctness experiment
         out = np.zeros(imgs1.shape)
 
         for i in range(0, len(imgs1)):
             img1 = (imgs1[i] + 1.) / 2.0
             img2 = (imgs2[i] + 1.) / 2.0
             out[i] = np.clip((poissonblending.blend(img1, img2, 1 - mask) - 0.5) * 2, -1.0, 1.0)
-            # print (np.max(out[i]), np.min(out[i]))
 
         return out.astype(np.float32)
 
-    # imgs2 is generator output
     def poisson_blend2(self, imgs1, imgs2, mask):
+        # call this while performing consistency experiment
         out = np.zeros(imgs1.shape)
 
         for i in range(0, len(imgs1)):
-            #print 'here',np.max(imgs1[i]), np.max(imgs2[i]), np.min(imgs1[i]), np.min(imgs2[i]) 
             img1 = (imgs1[i] + 1.) / 2.0
             img2 = (imgs2[i] + 1.) / 2.0
             out[i] = np.clip((poissonblending.blend(img1, img2, 1 - mask[i]) - 0.5) * 2, -1.0, 1.0)
-            # print (np.max(out[i]), np.min(out[i]))
 
         return out.astype(np.float32)
 
@@ -228,8 +228,74 @@ class DCGAN(object):
 
     def get_mse(self, img_true, img_gen):
         return compare_mse(img_true.astype(np.float32), img_gen.astype(np.float32))
-        
+
+    def same_z_diff_keypoints(self):
+        # call this while trying to show generated samples for same z-vector but different 
+        # keypoint maps
+        try:
+            tf.global_variables_initializer().run()
+        except:
+            tf.initialize_all_variables().run()
+
+        isLoaded = self.load(F.checkpoint_dir)
+        assert(isLoaded)
+
+        files = os.listdir('test_images/')
+        imgs = [x for x in files if 'im' in x]
+        keys = [x.replace('img', 'ky') for x in imgs][:64]
+
+        for i in range(200):
+            shuffle(files)
+            imgs = [x for x in files if 'im' in x]
+            keys = [x.replace('img', 'ky') for x in imgs][:64]
+            z_new = np.random.uniform(-1, 1, size=(F.z_dim))
+            batch_keypoints = np.array([get_image('test_images/' + batch_file, F.output_size, is_crop=self.is_crop)
+                         for batch_file in keys]).astype(np.float32)
+
+            fd = {
+                self.z_gen: [z_new] * F.batch_size,
+                self.keypoints: batch_keypoints,
+                self.is_training: False
+            }
+            G_imgs = self.sess.run(self.G, feed_dict=fd)
+
+            save_images(G_imgs, [8, 8], 'experiments/same_z_diff_k_image_' + str(i) + '.png')
+            save_images(batch_keypoints, [8, 8], 'experiments/same_z_diff_k_keypts_' + str(i) + '.png')
+
+    def diff_z_same_keypoints(self):
+        # call this while trying to show generated samples for different z-vectors but
+        # same keypoint map
+
+        try:
+            tf.global_variables_initializer().run()
+        except:
+            tf.initialize_all_variables().run()
+
+        isLoaded = self.load(F.checkpoint_dir)
+        assert(isLoaded)
+
+        files = os.listdir('test_images/')
+        imgs = [x for x in files if 'im' in x]
+        keys = [x.replace('img', 'ky') for x in imgs][:64]
+  
+        batch_keypoints = np.array([get_image('test_images/' + batch_file, F.output_size, is_crop=self.is_crop)
+                     for batch_file in keys]).astype(np.float32)
+
+        for i in range(200):
+            z_new = np.random.uniform(-1, 1, size=(F.batch_size, F.z_dim))
+            keypoints = np.array([batch_keypoints[(i * 7) % 64]] * F.batch_size)
+            fd = {
+                self.z_gen: z_new,
+                self.keypoints: keypoints,
+                self.is_training: False
+            }
+            G_imgs = self.sess.run(self.G, feed_dict=fd)
+
+            save_images(G_imgs, [8, 8], 'experiments/diff_z_same_k_image_' + str(i) + '.png')
+            save_images(keypoints, [8, 8], 'experiments/diff_z_same_k_keypts_' + str(i) + '.png')  
+
     def complete(self):
+        # this is main method which does inpainting (correctness experiment)
         def make_dir(name):
             # Works on python 2.7, where exist_ok arg to makedirs isn't available.
             p = os.path.join(F.outDir, name)
@@ -248,15 +314,14 @@ class DCGAN(object):
         isLoaded = self.load(F.checkpoint_dir)
         assert(isLoaded)
 
-        files = os.listdir('/home/avisek/faces_angie/')    #os.listdir('samples_complete/')
-        imgs = [x for x in files if 'face' in x]
+        files = os.listdir('test_images/') #path of held out images for inpainitng experiment
+        print("Total files to inpaint :", len(files))
+        imgs = [x for x in files if 'img' in x]
+        keys = [x.replace('img', 'ky') for x in imgs]
         nImgs = len(imgs)
-        print ('Number of images is', nImgs)
 
         batch_idxs = int(np.ceil(nImgs / F.batch_size))
-
-        
-        # lowres_mask = np.zeros(self.lowres_shape)
+        print("Total batches:::", batch_idxs)
         if F.maskType == 'random':
             fraction_masked = F.fraction_masked
             mask = np.ones(self.image_shape)
@@ -269,6 +334,31 @@ class DCGAN(object):
             l = int(F.output_size * F.centerScale)
             u = int(F.output_size * (1.0-F.centerScale))
             mask[l:u, l:u, :] = 0.0
+
+        elif F.maskType == 'left':
+            mask = np.ones(self.image_shape)
+            c = F.output_size // 2
+            mask[:,:c,:] = 0.0
+        
+        elif F.maskType == 'freehand_poly':
+            image = np.ones(self.image_shape)
+            mask = np.ones(self.image_shape)
+            if F.output_size == 128:
+                contours = 2 * np.array([ [10,10], [10, 15], [7, 30], [12, 54], [35, 50], [50, 48], [30, 25]])
+            else:
+                contours = np.array([ [10,10], [10, 15], [7, 30], [12, 54], [35, 50], [50, 48], [30, 25]])
+            black = (0, 0, 0)
+            cv2.fillPoly(image, pts = [contours], color = (0, 0, 0))
+            mask = image 
+
+
+
+        elif F.maskType == 'full':
+            mask = np.ones(self.image_shape)
+
+        elif F.maskType == 'grid':
+            mask = np.zeros(self.image_shape)
+            mask[::4,::4,:] = 1.0
 
         elif F.maskType == 'checkboard':
             if F.output_size == 128:
@@ -283,48 +373,26 @@ class DCGAN(object):
             atom = np.vstack((stack1, stack2))
             mask = np.tile(atom, (num_tiles, num_tiles, 1))
 
-        elif F.maskType == 'left':
-            mask = np.ones(self.image_shape)
-            c = F.output_size // 2
-            mask[:,:c,:] = 0.0
-        
-        elif F.maskType == 'freehand_poly':
-            image = np.ones(self.image_shape)
-            mask = np.ones(self.image_shape)
-            #points = [[(10,10), (23,23), (31,31), (40,40)]]
-            #roi_corners = np.array(points)
-            #contours = np.array( [ [32,32],[16,48], [48,16], [48,48], [30,30], [20,20], [10,50] ] )
-            #contours = np.array([ [10,10], [15,10], [30,7], [54, 12], [50, 35], [48, 50], [25, 30]           ])
-            if F.output_size == 128:
-                contours = 2 * np.array([ [10,10], [10, 15], [7, 30], [12, 54], [35, 50], [50, 48], [30, 25]])
-            else:
-                contours = np.array([ [10,10], [10, 15], [7, 30], [12, 54], [35, 50], [50, 48], [30, 25]           ])
-
-            black = (0, 0, 0)
-            cv2.fillPoly(image, pts = [contours], color = (0, 0, 0))
-            mask = image #np.logical_and(image, mask)
-            #mask = cv2.bitwise_and(image, mask) 
-
-
         else:
             assert(False)
-        
-        img_data_path = '/home/avisek/faces_angie/'  #'samples_complete/'
-        psnr_list, psnr_list2 = [], []
 
+        img_data_path = 'test_images/'
+
+        psnr_list, psnr_list2 = [], []
         for idx in xrange(0, batch_idxs):
+            print("Processing batch number:  ", idx)
             l = idx * F.batch_size
             u = min((idx + 1) * F.batch_size, nImgs)
             batchSz = u - l
             batch_files = imgs[l:u]
-            #print(batch_files)
             batch_images = np.array([get_image(img_data_path + batch_file, F.output_size, is_crop=self.is_crop)
-                     for batch_file in batch_files]).astype(np.float32)
-            #print np.mean((scipy.misc.imread(img_data_path + batch_files[0]) / 127.5) - 1), np.mean(batch_images[0])
-            #print("mean is ::", batchSz,  F.batch_size,  np.mean(batch_images),  np.max(batch_images),  np.min(batch_images))
+                                   for batch_file in batch_files]).astype(np.float32)
             
+            batch_files = keys[l:u]
+            batch_keypoints = np.array([get_image(img_data_path + batch_file, F.output_size, is_crop=self.is_crop)
+                                      for batch_file in batch_files]).astype(np.float32)
+
             if batchSz < F.batch_size:
-                print(batchSz)
                 padSz = ((0, int(F.batch_size - batchSz)), (0,0), (0,0), (0,0))
                 batch_images = np.pad(batch_images, padSz, 'constant')
                 batch_images = batch_images.astype(np.float32)
@@ -337,7 +405,6 @@ class DCGAN(object):
             nCols = min(8, batchSz)
             save_images(batch_images[:batchSz,:,:,:], [nRows,nCols],
                         os.path.join(F.outDir, 'before_' + str(idx) + '.png'))
-            #sys.exit()
             masked_images = np.multiply(batch_images, mask)# - np.multiply(np.ones(batch_images.shape), 1.0 - mask)
             save_images(np.array(masked_images - np.multiply(np.ones(batch_images.shape), 1.0 - mask)), [nRows,nCols],
                         os.path.join(F.outDir, 'mask_' + str(idx) + '.png'))
@@ -346,10 +413,11 @@ class DCGAN(object):
                 fd = {
                     self.z_gen: zhats,
                     self.mask: [mask] * F.batch_size,
+                    self.keypoints: batch_keypoints,
                     self.images: batch_images,
-                    # self.is_training: False
+                    self.is_training: False
                 }
-                run = [self.complete_loss, self.grad_complete_loss, self.G_mean]
+                run = [self.complete_loss, self.grad_complete_loss, self.G]
                 loss, g, G_imgs = self.sess.run(run, feed_dict=fd)
 
                 for img in range(batchSz):
@@ -358,20 +426,9 @@ class DCGAN(object):
                         np.savetxt(f, zhats[img:img+1])
 
                 if i % F.outInterval == 0:
-                    print(i, np.mean(loss[0:batchSz]))
-                    # imgName = os.path.join(F.outDir,
-                    #                        'hats_imgs/{:04d}.png'.format(i))
-                    # nRows = np.ceil(batchSz/8)
-                    # nCols = min(8, batchSz)
-                    # save_images(G_imgs[:batchSz,:,:,:], [nRows,nCols], imgName)
-                    # if lowres_mask.any():
-                    #     imgName = imgName[:-4] + '.lowres.png'
-                    #     save_images(np.repeat(np.repeat(lowres_G_imgs[:batchSz,:,:,:],
-                    #                           self.lowres, 1), self.lowres, 2),
-                    #                 [nRows,nCols], imgName)
+                    print("Iteration: {:04d} |  Loss = {:.6f}".format(i, np.mean(loss[0:batchSz])))
 
                     inv_masked_hat_images = masked_images + np.multiply(G_imgs, 1.0-mask)
-                    # print ('debug 1: ', np.mean(mask), np.max(inv_masked_hat_images), np.min(G_imgs), np.max(masked_images), np.min(masked_images))
                     completed = inv_masked_hat_images
                     imgName = os.path.join(F.outDir,
                                            'completed/_{:02d}_{:04d}.png'.format(idx, i))
@@ -421,25 +478,23 @@ class DCGAN(object):
 
 
             blended_images = self.poisson_blend(batch_images, G_imgs, mask)
-            imgName = os.path.join(F.outDir,
-                                           'completed/{:02d}_blended.png'.format(idx))
-                    # scipy.misc.imsave(imgName, (G_imgs[0] + 1) * 127.5)
+            imgName = os.path.join(F.outDir, 'completed/{:02d}_blended.png'.format(idx))
             save_images(blended_images[:batchSz,:,:,:], [nRows,nCols], imgName)
             
             for i in range(len(masked_images)):
                 psnr_list.append(self.get_psnr(batch_images[i], blended_images[i]))
-            
-            print("For current batch | PSNR before blending::: ",  np.mean(psnr_list2))
-            print("For current batch | PSNR after blending::: ",  np.mean(psnr_list))
-        
-        np.save(F.outDir + '/complete_psnr_vals.npy', np.array(psnr_list))
-        np.save(F.outDir + '/complete_psnr_vals_noblend.npy', np.array(psnr_list2))
 
+            print("After current batch | PSNR before blending::: ",  np.mean(psnr_list2))
+            print("After current batch | PSNR after blending::: ",  np.mean(psnr_list))
 
         print ('Final | PSNR Before Blending:: ', np.mean(psnr_list2))
+        np.save(F.outDir + '/complete_psnr_after_blend.npy', np.array(psnr_list)) # For statistical testing
+
         print ('Final | PSNR After Blending:: ', np.mean(psnr_list))
-    
-    def create_mask(self, centerScale=0.25, temporal=False, check_size=8):
+        np.save(F.outDir + '/complete_psnr_before_blend.npy', np.array(psnr_list2)) # For statistical testing
+
+    def create_mask(self, centerScale=0.25, temporal=True, check_size=8):
+        # specifically creates random sized/designed mask for consistency experiemnts
 
         if F.maskType == 'freehand_poly':
             image = np.ones(self.image_shape)
@@ -449,27 +504,15 @@ class DCGAN(object):
             freehand_list.append( np.array([ [10,10], [10, 15], [7, 30], [12, 54], [35, 50], [50, 48], [30, 25]]))
             freehand_list.append(np.array([ [20,1], [20,20], [10,52], [25, 48], [48,40], [28,20], [20,1] ]))
             freehand_list.append(np.array([ [1,20], [20,20], [52,10], [48, 25], [40,48], [20, 28], [1, 20] ]))
-
-            #contours = np.array( [ [32,32],[16,48], [48,16], [48,48], [30,30], [20,20], [10,50] ] )
-            #contours = np.array([ [10,10], [15,10], [30,7], [54, 12], [50, 35], [48, 50], [25, 30]           ])
-            #contours = np.array([ [10,10], [10, 15], [7, 30], [12, 54], [35, 50], [50, 48], [30, 25]           ])
-            #contours =  np.array([ [20,1], [20,20], [10,52], [25, 48], [48,40], [28,20], [20,1] ])
             index = np.random.randint(0,4)
 
             black = (0, 0, 0)
-            if F.output_size == 128:
-                cv2.fillPoly(image, pts = [2 * freehand_list[index]], color = (0, 0, 0))
+            if F.output_size ==128:
+                 cv2.fillPoly(image, pts = [2 * freehand_list[index]], color = (0, 0, 0))
             else:
-                cv2.fillPoly(image, pts = [freehand_list[index]], color = (0, 0, 0))
-            mask = image #np.logical_and(image, mask)
-            #mask = cv2.bitwise_and(image, mask)
+                 cv2.fillPoly(image, pts = [freehand_list[index]], color = (0, 0, 0))
+            mask = image 
 
-
-
-        elif F.maskType == 'random':
-            fraction_masked = 0.7
-            mask = np.ones(self.image_shape)
-            mask[np.random.random(self.image_shape[:2]) < fraction_masked] = 0.0
 
         elif F.maskType == 'center':
             assert(centerScale <= 0.5)
@@ -477,28 +520,15 @@ class DCGAN(object):
             sz = F.output_size
             if temporal == True:
               centerScale = random.uniform(centerScale - 0.05, centerScale + 0.05)
-
-
+              
             l = int(F.output_size * centerScale)
             u = int(F.output_size * (1.0-centerScale))
             mask[l:u, l:u, :] = 0.0
 
-        elif F.maskType == 'left':
-            mask = np.ones(self.image_shape)
-            c = F.output_size // 2
-            mask[:,:c,:] = 0.0
-
-        elif F.maskType == 'full':
-            mask = np.ones(self.image_shape)
-
-        elif F.maskType == 'grid':
-            mask = np.zeros(self.image_shape)
-            mask[::4,::4,:] = 1.0
-
         elif F.maskType == 'checkboard':
             if temporal == True:
                 check_size_list = [8, 16, 32]
-                index = np.random.randint(0,3)
+                index = np.random.randint(0, 3)
                 check_size = check_size_list[index]
 
             num_tiles = int(self.image_shape[0] / (2 * check_size))
@@ -508,11 +538,26 @@ class DCGAN(object):
             stack2 = np.hstack((b1, w1))
             atom = np.vstack((stack1, stack2))
             mask = np.tile(atom, (num_tiles, num_tiles, 1))
+
+        elif F.maskType == 'random':
+            fraction_masked = F.fraction_masked
+            mask = np.ones(self.image_shape)
+            mask[np.random.random(self.image_shape[:2]) < fraction_masked] = 0.0
+
+        elif F.maskType == 'left':
+            mask = np.ones(self.image_shape)
+            c = F.output_size // 2
+            mask[:,:c,:] = 0.0
+        
         else:
             assert(False)
         return mask
 
     def temporal_consistency(self):
+        # main method for performing experiments related to consistency
+        # idea: in a batch of 64 images, there will be 8 subjects with 8 different kinds of damages
+        # 8 rows of different subjects and 8 columns for each subject
+
         def make_dir(name):
             # Works on python 2.7, where exist_ok arg to makedirs isn't available.
             p = os.path.join(F.outDir, name)
@@ -530,12 +575,11 @@ class DCGAN(object):
         isLoaded = self.load(F.checkpoint_dir)
         assert(isLoaded)
 
-        files = os.listdir('samples_complete/')
-        imgs = [x for x in files if 'im' in x][:32]
+        files = os.listdir('test_images/')
+        imgs = [x for x in files if 'im' in x]
+        keys = [x.replace('img', 'ky') for x in imgs]
         nImgs = len(imgs)
-        # print ('Number of images is', nImgs)
-
-        batch_idxs = int(np.ceil(nImgs / F.batch_size))
+        batch_idxs = int(np.ceil(nImgs / int(F.batch_size / 8)))
 
         masks = []
         for i in range(int(F.batch_size / 8)):
@@ -545,18 +589,20 @@ class DCGAN(object):
         for i in range(F.batch_size):
             mask[i] = masks[i % 8]
 
-        save_images(mask[:F.batch_size,:,:,:], [8,8],
-                        os.path.join(F.outDir, 'mask.png'))
-
-        img_data_path = 'samples_complete/'
+        img_data_path = 'test_images/'
         psnr_list, psnr_list2 = [], []
-        for idx in xrange(0, int(batch_idxs * 8)):
+        for idx in xrange(0, batch_idxs):  # because in a batch we are taking 8 images instead of 64
+            print("Processing batch {:03d} out of {:03d}".format(idx,  batch_idxs))
             batch_size = int(F.batch_size / 8)
             batchSz = F.batch_size
             l = idx * batch_size
             u = min((idx + 1) * batch_size, nImgs)
             batch_files = imgs[l:u]
             batch_images = np.array([get_image(img_data_path + batch_files[int(i / 8)], F.output_size, is_crop=self.is_crop)
+                     for i in range(len(batch_files) * 8)]).astype(np.float32)
+
+            batch_files = keys[l:u]
+            batch_keypoints = np.array([get_image(img_data_path + batch_files[int(i / 8)], F.output_size, is_crop=self.is_crop)
                      for i in range(len(batch_files) * 8)]).astype(np.float32)
 
             nRows = np.ceil(batchSz / 8)
@@ -570,25 +616,26 @@ class DCGAN(object):
 
             zhats = np.random.uniform(-1, 1, size=(F.batch_size, F.z_dim))
             m = 0
-            v = 0   
+            v = 0
 
             nRows = np.ceil(batchSz / 8)
             nCols = min(8, batchSz)
             save_images(batch_images[:batchSz,:,:,:], [nRows,nCols],
                         os.path.join(F.outDir, 'before_' + str(idx) + '.png'))
 
-            masked_images = np.multiply(batch_images, mask)# - np.multiply(np.ones(batch_images.shape), 1.0 - mask)
-            save_images(np.array(masked_images - np.multiply(np.ones(batch_images.shape), 1.0 - mask)), [nRows,nCols],
+            masked_images = np.multiply(batch_images, mask) 
+            save_images(np.array(mask - np.multiply(np.ones(batch_images.shape), 1.0 - mask)), [nRows,nCols],
                         os.path.join(F.outDir, 'mask_' + str(idx) + '.png'))
 
             for i in xrange(F.nIter):
                 fd = {
                     self.z_gen: zhats,
                     self.mask: mask,
+                    self.keypoints: batch_keypoints,
                     self.images: batch_images,
-                    # self.is_training: False
+                    self.is_training: False
                 }
-                run = [self.complete_loss, self.grad_complete_loss, self.G_mean]
+                run = [self.complete_loss, self.grad_complete_loss, self.G]
                 loss, g, G_imgs = self.sess.run(run, feed_dict=fd)
 
                 for img in range(batchSz):
@@ -597,24 +644,11 @@ class DCGAN(object):
                         np.savetxt(f, zhats[img:img+1])
 
                 if i % F.outInterval == 0:
-                    print(i, np.mean(loss[0:batchSz]))
-                    # imgName = os.path.join(F.outDir,
-                    #                        'hats_imgs/{:04d}.png'.format(i))
-                    # nRows = np.ceil(batchSz/8)
-                    # nCols = min(8, batchSz)
-                    # save_images(G_imgs[:batchSz,:,:,:], [nRows,nCols], imgName)
-                    # if lowres_mask.any():
-                    #     imgName = imgName[:-4] + '.lowres.png'
-                    #     save_images(np.repeat(np.repeat(lowres_G_imgs[:batchSz,:,:,:],
-                    #                           self.lowres, 1), self.lowres, 2),
-                    #                 [nRows,nCols], imgName)
+                    print("Iterations: {:04d} |  Loss = {:.4f}".format(i, np.mean(loss[0:batchSz])))
 
                     inv_masked_hat_images = masked_images + np.multiply(G_imgs, 1.0-mask)
-                    # print ('debug 1: ', np.mean(mask), np.max(inv_masked_hat_images), np.min(G_imgs), np.max(masked_images), np.min(masked_images))
                     completed = inv_masked_hat_images
-                    imgName = os.path.join(F.outDir,
-                                           'completed/_{:02d}_{:04d}.png'.format(idx, i))
-                    # scipy.misc.imsave(imgName, (G_imgs[0] + 1) * 127.5)
+                    imgName = os.path.join(F.outDir, 'completed/{:02d}_{:04d}.png'.format(idx, i))
                     save_images(completed[:batchSz,:,:,:], [nRows,nCols], imgName)
 
                 if F.approach == 'adam':
@@ -655,123 +689,89 @@ class DCGAN(object):
                     assert(False)
 
             inv_masked_hat_images = masked_images + np.multiply(G_imgs, 1.0 - mask)
+            blended_images = self.poisson_blend2(batch_images, G_imgs, mask)
+            imgName = os.path.join(F.outDir, 'completed/{:02d}_blended.png'.format(idx))
+            save_images(blended_images[:batchSz,:,:,:], [nRows,nCols], imgName)
 
+            # calculate consistency for each possible pairwise inpainted images before/after blending
             for i in range(8):
                 for j in range(8):
                     for k in range(j):
                         psnr_list2.append(self.get_mse(batch_images[i * 8 + j], inv_masked_hat_images[i * 8 + k]))
-
-            blended_images = self.poisson_blend2(batch_images, G_imgs, mask)
-            imgName = os.path.join(F.outDir,
-                                           'completed/{:02d}_blended.png'.format(idx))
-                    # scipy.misc.imsave(imgName, (G_imgs[0] + 1) * 127.5)
-            save_images(blended_images[:batchSz,:,:,:], [nRows,nCols], imgName)
+                        psnr_list.append(self.get_mse(blended_images[i * 8 + j], blended_images[i * 8 + k]))
             
-            for i in range(8):
-                for j in range(8):
-                    for k in range(j):
-                        psnr_list.append(self.get_mse(blended_images[i * 8 + j], blended_images[i * 8 + k]))        
 
             print("Uptil now | MSE Before Blending::",  np.mean(psnr_list2))
             print("Uptil now | MSE After Blending::",  np.mean(psnr_list))
-        
-        np.save(F.outDir + '/temporal_psnr_vals.npy', np.array(psnr_list))
-        np.save(F.outDir + '/complete_psnr_vals_noblend.npy', np.array(psnr_list2))
+
         print ('Final | MSE Before Blending:: ', np.mean(psnr_list2))
+        np.save(F.outDir + '/mse_before_blend.npy', np.array(psnr_list))   # for statistical testing
+
         print ('Final | MSE After Blending:: ', np.mean(psnr_list))
-       
-    def get_inception_score(self):
-        if F.dataset == "lsun" or not F.inc_score:
-            return 0.0, 0.0
+        np.save(F.outDir + '/mse_after_blend.npy', np.array(psnr_list2))  # for statistical testing
 
-        samples = []
-        for k in range(50000 // F.batch_size):
-            sample_z = np.random.uniform(
-                self.ra, self.rb, [F.batch_size, F.z_dim]).astype(np.float32)
-            images = self.sess.run(self.G_mean, {self.z: sample_z})
-            samples.append(images)
-        samples = np.vstack(samples)
-        return self.inception_module.get_inception_score(samples)
-
-    def discriminator(self, image, reuse=False):
+    def discriminator(self, image, keypoints, reuse=False):
         with tf.variable_scope('D'):
             if reuse:
                 tf.get_variable_scope().reuse_variables()
 
-            if F.dataset == "celebA":
-                dim = 64   # intially it was 64 for 64X64 generator output
-                # this is meant for 128x128 images
-                if F.output_size == 128:
+            dim = 64
+            image = tf.concat([image, keypoints], 3)
+            if F.output_size == 128:
                   h0 = lrelu(conv2d(image, dim, name='d_h0_conv'))
-                  h1 = lrelu(batch_norm(name='d_bn1')(conv2d(h0, dim * 2, name='d_h1_conv')))
-                  h2 = lrelu(batch_norm(name='d_bn2')(conv2d(h1, dim * 4, name='d_h2_conv')))
-                  h3 = lrelu(batch_norm(name='d_bn3')(conv2d(h2, dim * 8, name='d_h3_conv')))
-                  h4 = lrelu(batch_norm(name='d_bn4')(conv2d(h3, dim * 16, name='d_h4_conv')))
+                  h1 = lrelu(batch_norm(name='d_bn1')(conv2d(h0, dim * 2, name='d_h1_conv'), self.is_training))
+                  h2 = lrelu(batch_norm(name='d_bn2')(conv2d(h1, dim * 4, name='d_h2_conv'), self.is_training))
+                  h3 = lrelu(batch_norm(name='d_bn3')(conv2d(h2, dim * 8, name='d_h3_conv'), self.is_training))
+                  h4 = lrelu(batch_norm(name='d_bn4')(conv2d(h3, dim * 16, name='d_h4_conv'), self.is_training))
                   h4 = tf.reshape(h4, [F.batch_size, -1])
                   h5 = linear(h4, 1, 'd_h5_lin')
                   return tf.nn.sigmoid(h5), h5
 
-                else:
+            else:
                   h0 = lrelu(conv2d(image, dim, name='d_h0_conv'))
-                  h1 = lrelu(batch_norm(name='d_bn1')(conv2d(h0, dim * 2, name='d_h1_conv')))
-                  h2 = lrelu(batch_norm(name='d_bn2')(conv2d(h1, dim * 4, name='d_h2_conv')))
-                  h3 = lrelu(batch_norm(name='d_bn3')(conv2d(h2, dim * 8, name='d_h3_conv')))
+                  h1 = lrelu(batch_norm(name='d_bn1')(conv2d(h0, dim * 2, name='d_h1_conv'), self.is_training))
+                  h2 = lrelu(batch_norm(name='d_bn2')(conv2d(h1, dim * 4, name='d_h2_conv'), self.is_training))
+                  h3 = lrelu(batch_norm(name='d_bn3')(conv2d(h2, dim * 8, name='d_h3_conv'), self.is_training))
                   h4 = tf.reshape(h3, [F.batch_size, -1])
                   h5 = linear(h4, 1, 'd_h5_lin')
                   return tf.nn.sigmoid(h5), h5
 
-    def generator(self, z):
+    def generator(self, z, keypoints):
+        dim = 64
+        k = 5
         with tf.variable_scope("G"):
-            if F.dataset == "lsun" or F.dataset == "celebA":
-                s = F.output_size
-                dim = 64
-                #s2, s4, s8, s16 = int(s / 2), int(s / 4), int(s / 8), int(s / 16)
-                s2, s4, s8, s16, s32 = int(s / 2), int(s / 4), int(s / 8), int(s / 16), int(s/32)
-                
-                if (s == 128):  # idea taken from https://github.com/carpedm20/DCGAN-tensorflow/blob/master/model.py
-                    z_ = linear(z, dim * 16 * 4* 4, scope = 'g_h0_lin')
-                    h0 = tf.reshape(z_, [-1, 4, 4, dim * 16])
-                    h0 = tf.nn.relu(batch_norm(name='g_bn0')(h0))
+              s2, s4, s8, s16 = int(F.output_size / 2), int(F.output_size / 4), int(F.output_size / 8), int(F.output_size / 16)
+              z = tf.reshape(z, [F.batch_size, 1, 1, 100])
+              z = tf.tile(z, [1, F.output_size, F.output_size, 1])
+              z = tf.concat([z, keypoints], 3)
 
-                    h1 = deconv2d(h0, [F.batch_size, 8, 8, dim * 8], name='g_h1')
-                    h1 = tf.nn.relu(batch_norm(name='g_bn1')(h1))
+              h0 = z
+            
+              h1 = tf.nn.relu(batch_norm(name='g_bn1')(conv2d(h0, dim * 2, 5, 5, 1, 1, name='g_h1_conv'), self.is_training))
+              h2 = tf.nn.relu(batch_norm(name='g_bn2')(conv2d(h1, dim * 2, k, k, 2, 2, name='g_h2_conv'), self.is_training))
+              h3 = tf.nn.relu(batch_norm(name='g_bn3')(conv2d(h2, dim * 4, k, k, 2, 2, name='g_h3_conv'), self.is_training))
+              h4 = tf.nn.relu(batch_norm(name='g_bn4')(conv2d(h3, dim * 8, k, k, 2, 2, name='g_h4_conv'), self.is_training))
+              h5 = tf.nn.relu(batch_norm(name='g_bn5')(conv2d(h4, dim * 16, k, k, 2, 2, name='g_h5_conv'), self.is_training))
 
-                    h2 = deconv2d(h1, [F.batch_size, 16, 16, dim * 4], name='g_h2')
-                    h2 = tf.nn.relu(batch_norm(name='g_bn2')(h2))
+              h6 = deconv2d(h5, [F.batch_size, s8, s8, dim * 8], k, k, 2, 2, name = 'g_deconv1')
+              h6 = tf.nn.relu(batch_norm(name = 'g_bn6')(h6, self.is_training))
+                      
+              h7 = deconv2d(h6, [F.batch_size, s4, s4, dim * 4], k, k, 2, 2, name = 'g_deconv2')
+              h7 = tf.nn.relu(batch_norm(name = 'g_bn7')(h7, self.is_training))
 
-                    h3 = deconv2d(h2, [F.batch_size, 32, 32, dim * 2], name='g_h3')
-                    h3 = tf.nn.relu(batch_norm(name='g_bn3')(h3))
+              h8 = deconv2d(h7, [F.batch_size, s2, s2, dim * 2], k, k, 2, 2, name = 'g_deconv4')
+              h8 = tf.nn.relu(batch_norm(name = 'g_bn8')(h8, self.is_training))
 
-                    h4 = deconv2d(h3, [F.batch_size, 64, 64, dim * 1], name='g_h4')
-                    h4 = tf.nn.relu(batch_norm(name='g_bn4')(h4))
-
-                    h5 = deconv2d(h4, [F.batch_size, 128, 128, F.c_dim], name='g_h5')
-                    h5 = tf.nn.tanh(h5)
-                    return h5
-                else:
-                    z_ = linear(z, dim * 8 * 4* 4, scope = 'g_h0_lin')
-                    h0 = tf.reshape(z_, [-1, 4, 4, dim * 8])
-                    h0 = tf.nn.relu(batch_norm(name='g_bn0')(h0))
-
-                    h1 = deconv2d(h0, [F.batch_size, 8, 8, dim * 4], name='g_h1')
-                    h1 = tf.nn.relu(batch_norm(name='g_bn1')(h1))
-
-                    h2 = deconv2d(h1, [F.batch_size, 16, 16, dim * 2], name='g_h2')
-                    h2 = tf.nn.relu(batch_norm(name='g_bn2')(h2))
-
-                    h3 = deconv2d(h2, [F.batch_size, 32, 32, dim * 1], name='g_h3')
-                    h3 = tf.nn.relu(batch_norm(name='g_bn3')(h3))
-
-                    h4 = deconv2d(h3, [F.batch_size, 64, 64, F.c_dim], name='g_h4')
-                    h4 = tf.nn.tanh(h4)
-                    return h4
-
-    def save(self, checkpoint_dir):
-        model_name = "model.ckpt"
+              h9 = deconv2d(h8, [F.batch_size, F.output_size, F.output_size, 3], k, k, 2, 2, name ='g_hdeconv5')
+              h9 = tf.nn.tanh(h9, name = 'g_tanh')
+              return h9
+              
+    def save(self, checkpoint_dir, step=0):
+        model_name = "model"
         if not os.path.exists(checkpoint_dir):
             os.makedirs(checkpoint_dir)
 
-        self.saver.save(self.sess, os.path.join(checkpoint_dir, model_name))
+        self.saver.save(self.sess, os.path.join(checkpoint_dir, model_name), global_step=step)
 
     def load(self, checkpoint_dir):
         print(" [*] Reading checkpoints...")

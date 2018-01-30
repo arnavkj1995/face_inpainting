@@ -4,7 +4,7 @@ import tensorflow as tf
 
 from tensorflow.python.framework import ops
 
-from utils_errors import *
+from utils import *
 
 F = tf.flags.FLAGS
 
