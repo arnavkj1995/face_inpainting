@@ -54,7 +54,7 @@ def convert_to(images, landmarks, name):
     landmark_cols = landmarks.shape[2]
     landmark_depth = landmarks.shape[3]
 
-    filename = os.path.join('data_records2', name + '.tfrecords')
+    filename = os.path.join(save_path, name + '.tfrecords')
     print('Writing', filename)
     writer = tf.python_io.TFRecordWriter(filename)
 
@@ -75,21 +75,6 @@ def convert_to(images, landmarks, name):
         writer.write(example.SerializeToString())
 
     writer.close()
-
-def make_key_point_matrix(x,y, W, H, n_grid=16):
-    resolution = 1.0/n_grid
-    #print "x and y:  ", x,y
-    #print "Res: ", resolution
-    X = x/float(W)   #normalized coordinate
-    Y = y/float(H)
-    loc = np.zeros((n_grid, n_grid,1), dtype=bool)
-    #print "Loc size is::", loc.nbytes
-    X_bin = np.clip(int(X/resolution), 0 ,15)
-    Y_bin = np.clip(int(Y/resolution), 0 ,15)
-    #print "Selected bins: ", X_bin, Y_bin
-    loc[X_bin, Y_bin,0] = 1
-    #time.sleep(300)
-    return loc
 
 def visualize_facial_landmarks(image, shape, colors=None, alpha=0.75):
     # create two copies of the input image -- one for the
@@ -141,7 +126,7 @@ def visualize_facial_landmarks(image, shape, colors=None, alpha=0.75):
     return overlay
 
 if __name__ =='__main__':
-    if len(sys.argv) != 2:
+    if len(sys.argv) != 3:
         print(
             
             " python prepare_bb_land.py  shape_predictor_68_face_landmarks.dat "
@@ -150,11 +135,14 @@ if __name__ =='__main__':
         exit()
 
     predictor_path = sys.argv[1]
-
+    
+    save_path = sys.argv[2] + '_records/'
+    
     detector = dlib.get_frontal_face_detector()
     predictor = dlib.shape_predictor(predictor_path)
+    images_dir_path = '../dataset/' + sys.argv[2] + '/images/'
 
-    face_image_list = os.listdir('data/')  # dir of extracted faces
+    face_image_list = os.listdir(images_dir_path)  # dir of extracted faces
     counter = 0
 
     image_list, landmark_list = [], []
@@ -163,7 +151,7 @@ if __name__ =='__main__':
     for imgs in face_image_list:
         counter += 1
 
-        filename = os.path.join('data/', imgs) 
+        filename = os.path.join(images_dir_path, imgs) 
           
         img = io.imread(filename)
         arr = np.array(img) 
@@ -174,6 +162,7 @@ if __name__ =='__main__':
         # will make everything bigger and allow us to detect more faces.
         dets = detector(img, 1)
         #print("Number of faces detected: {}".format(len(dets)))
+        
         for k, d in enumerate(dets):
             # Get the landmarks/parts for the face in box d.
             shape = predictor(img, d)
@@ -182,17 +171,12 @@ if __name__ =='__main__':
             key_point_matrix = visualize_facial_landmarks(img, shape)
             key_point_matrix = np.array(key_point_matrix, dtype=np.uint8)
 
-            # imsave('im' + str(len(image_list)) + '.png', arr)
-            # imsave('ky' + str(len(image_list)) + '.png', key_point_matrix)
-            # raw_input('done')
             image_list.append(arr)
             landmark_list.append(key_point_matrix)
 
             if len(image_list) == 10000:
-                # print (np.max(landmark_list), np.min(landmark_list))#, np.sum(landmark_list[landmark_list == 0]))
                 convert_to(np.asarray(image_list), np.asarray(landmark_list), 'celebA_' + str(tfrecord_ind))
                 image_list, landmark_list = [], []
                 tfrecord_ind += 1
-                # raw_input('vbjsid')
         
     convert_to(np.asarray(image_list), np.asarray(landmark_list), 'celebA_' + str(tfrecord_ind))
