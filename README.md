@@ -7,14 +7,14 @@ This is the training code of our paper on semantic inpainting of faces in tensor
 + pyamg (for Poisson Blending)
 
 ### Preprocessing
-+ Download the celebA dataset from [here](http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html) and move 2560 images to test/images and others in train/images
++ Download the celebA dataset from [here](http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html) and move 2560 images to `data/test/images` and others to `data/train/images`.
 + Download and extract the trained facial shape predictor from [here]( http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2).
 + Run the script to create tfrecords for training the model: 
 
-    `preprocess_train_images.py shape_predictor_68_face_landmarks.dat`
+    `python preprocess_train_images.py shape_predictor_68_face_landmarks.dat`
 + Run the script to generate keypoints maps for test images: 
 
-    `preprocess_test_images.py shape_predictor_68_face_landmarks.dat`
+    `python preprocess_test_images.py shape_predictor_68_face_landmarks.dat`
 
 ### Training
 + For training the model:
