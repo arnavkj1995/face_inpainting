@@ -1,5 +1,14 @@
-# error_concealment_GAN
-This is the training code of our paper on semantic inpainting of faces in tensorflow.
+
+# Consistent_Inpainting_GAN
+![ ](imgs/front.PNG?raw=true "Semantically guided GAN for face generation")
+This is the training code of our paper on consistent semantic inpainting of faces in Tensorflow | [Paper](http://arxiv.org/pdf/1711.06106.pdf).
+We show that conditioning GANs with facial semantic maps helps in :
++ Better image generation capability of generator
++ Better PSNR and visual performance during inpainting
++ Decoupling of pose and appearance of face
++ Consistency in inpainting
++ We improve upon [DIP](http://openaccess.thecvf.com/content_cvpr_2017/papers/Yeh_Semantic_Image_Inpainting_CVPR_2017_paper.pdf), CVPR-2017
+
 
 ### Dependencies
 + Tensorflow >= 1.0
@@ -27,6 +36,28 @@ This is the training code of our paper on semantic inpainting of faces in tensor
 + To run the consistency experiment:
 
   `python temporal.py --batch_size=64 --output_size=128`
+  
+### Independence of Pose and Appearance
+We show that conditioning GANs with facial maps helps in decoupling apperance of face(skin textures, gender) from pose (scale, orientation, facial global expression)
++ Different `z` vector but same facial maps
+![ ](imgs/same_k_diff_z.PNG?raw=true "Semantically guided GAN for face generation")
+
++ Different facial maps but same `z` vector
+![ ](imgs/same_z_diff_k.PNG?raw=true "Semantically guided GAN for face generation")
+
+  
+### Visualization of Consistency
+We evaluated "consistency" on pseudo corrupted sequences. 
++ Given an original starting image, corrupt it with different masks
++ Inpaint the corrupted images
++ Ideally all reconstructions should be identical
++ Parwise MSE between inpainted images gives a measure of consistency (Refer to paper for metrics)
+
+![ ](imgs/64X64_sequence_1.gif?raw=true "Semantically guided GAN for face generation") ![ ](imgs/64X64_sequence_2.gif?raw=true "Semantically guided GAN for face generation") ![ ](imgs/64X64_sequence_3.gif?raw=true "Semantically guided GAN for face generation")
+
+![ ](imgs/128X128_sequence_3.gif?raw=true "Semantically guided GAN for face generation")
+
+
 
 ### Citation
 If you find our work useful in your research, please cite:
