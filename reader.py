@@ -60,24 +60,3 @@ def read_and_decode(filename_queue, batch_size):
                                                  min_after_dequeue=1000)
     
     return images, annotations
-
-if __name__ =='__main__':
-    tfrecords_filename = [x for x in os.listdir('test_records/')]
-    filename_queue = tf.train.string_input_producer(
-                            tfrecords_filename, num_epochs=None)
-
-    images, keypoints = read_and_decode(filename_queue, 64)
-
-    with tf.Session() as sess:
-      # Start populating the filename queue.
-        coord = tf.train.Coordinator()
-        threads = tf.train.start_queue_runners(coord=coord)
-
-        for i in range(2048):
-            # Retrieve a single instance:
-            example, label = sess.run([images, keypoints])
-            scipy.misc.imsave('samples_complete/img' + str(i) + '.png', example[0])
-            scipy.misc.imsave('samples_complete/ky' + str(i) + '.png', label[0])
-
-        coord.request_stop()
-        coord.join(threads)

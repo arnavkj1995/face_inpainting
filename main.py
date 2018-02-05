@@ -59,7 +59,7 @@ else:
                     "Directory name containing the dataset [data]")
 flags.DEFINE_string("checkpoint_dir", "checkpoint/" + dataset + "/" + comment,
                     "Directory name to save the checkpoints [checkpoint]")
-flags.DEFINE_string("sample_dir", "samples/" + dataset + "/" + comment,
+flags.DEFINE_string("sample_dir", "samples/" + dataset,
                     "Directory name to save the image samples [samples]")
 flags.DEFINE_string("log_dir", "logs/" + dataset + "/" + comment,
                     "Directory name to save the logs [logs]")

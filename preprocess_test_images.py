@@ -18,8 +18,6 @@ from scipy.misc import imsave
 
 import tensorflow as tf
 
-from tensorflow.contrib.learn.python.learn.datasets import mnist
-
 FLAGS = None
 
 # define a dictionary that maps the indexes of the facial
@@ -33,48 +31,6 @@ FACIAL_LANDMARKS_IDXS = collections.OrderedDict([
     ("nose", (27, 35)),
     ("jaw", (0, 17))
 ])
-
-def _int64_feature(value):
-    return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
-
-def _bytes_feature(value):
-    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
-
-def convert_to(images, landmarks, name):
-    """Converts a dataset to tfrecords."""
-    if images.shape[0] != landmarks.shape[0]:
-    	raise ValueError('Images size %d does not match landmarks shape %d.' %
-                     (images.shape[0], num_examples))
-
-    rows = images.shape[1]
-    cols = images.shape[2]
-    depth = images.shape[3]
-
-    landmark_rows = landmarks.shape[1]
-    landmark_cols = landmarks.shape[2]
-    landmark_depth = landmarks.shape[3]
-
-    filename = os.path.join(save_path, name + '.tfrecords')
-    print('Writing', filename)
-    writer = tf.python_io.TFRecordWriter(filename)
-
-    for index in range(images.shape[0]):
-        image_raw = images[index].tostring()
-        landmark_raw = landmarks[index].tostring()
-
-        example = tf.train.Example(features=tf.train.Features(feature={
-            'height': _int64_feature(rows),
-            'width': _int64_feature(cols),
-            'depth': _int64_feature(depth),
-            'landmark_height': _int64_feature(landmark_rows),
-            'landmark_width': _int64_feature(landmark_cols),
-            'landmark_depth': _int64_feature(landmark_depth),
-            'landmark_raw': _bytes_feature(landmark_raw),
-            'image_raw': _bytes_feature(image_raw)}))
-        
-        writer.write(example.SerializeToString())
-
-    writer.close()
 
 def visualize_facial_landmarks(image, shape, colors=None, alpha=0.75):
     # create two copies of the input image -- one for the
@@ -126,7 +82,7 @@ def visualize_facial_landmarks(image, shape, colors=None, alpha=0.75):
     return overlay
 
 if __name__ =='__main__':
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 2:
         print(
             
             " python prepare_bb_land.py  shape_predictor_68_face_landmarks.dat "
@@ -136,17 +92,12 @@ if __name__ =='__main__':
 
     predictor_path = sys.argv[1]
     
-    save_path = sys.argv[2] + '_records/'
-    
     detector = dlib.get_frontal_face_detector()
     predictor = dlib.shape_predictor(predictor_path)
-    images_dir_path = '../dataset/' + sys.argv[2] + '/images/'
+    images_dir_path = 'data/test/images/'
 
     face_image_list = os.listdir(images_dir_path)  # dir of extracted faces
     counter = 0
-
-    image_list, landmark_list = [], []
-    tfrecord_ind = 0
 
     for imgs in face_image_list:
         counter += 1
@@ -171,12 +122,5 @@ if __name__ =='__main__':
             key_point_matrix = visualize_facial_landmarks(img, shape)
             key_point_matrix = np.array(key_point_matrix, dtype=np.uint8)
 
-            image_list.append(arr)
-            landmark_list.append(key_point_matrix)
-
-            if len(image_list) == 10000:
-                convert_to(np.asarray(image_list), np.asarray(landmark_list), 'celebA_' + str(tfrecord_ind))
-                image_list, landmark_list = [], []
-                tfrecord_ind += 1
-        
-    convert_to(np.asarray(image_list), np.asarray(landmark_list), 'celebA_' + str(tfrecord_ind))
+            imsave('test_images/img' + str(counter) + '.png', arr)
+            imsave('test_images/ky' + str(counter) + '.png', key_point_matrix)
